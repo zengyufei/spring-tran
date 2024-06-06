@@ -2,12 +2,14 @@ package com.example.tran.utils;
 
 import cn.hutool.core.util.StrUtil;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 
 /**
@@ -17,10 +19,21 @@ import java.util.concurrent.*;
  * @date 2024/05/30
  */
 @Slf4j
+@Component
 public class PkSync {
     private static Executor poolExecutor;
-    private final List<CompletableFuture<Void>> futures;
-    private final ConcurrentStopWatch sw;
+    private List<CompletableFuture<Void>> futures;
+    private ConcurrentStopWatch sw;
+
+    private static SpringSyncMethod springSyncMethod;
+
+    @Autowired
+    public void setSpringSyncMethod(SpringSyncMethod springSyncMethod) {
+        PkSync.springSyncMethod = springSyncMethod;
+    }
+
+    public PkSync() {
+    }
 
     public PkSync(Executor poolExecutor) {
         this(StrUtil.EMPTY, poolExecutor);
@@ -43,7 +56,7 @@ public class PkSync {
     public PkSync add(String taskName, Runnable runnable) {
         boolean inTransaction = TransactionSynchronizationManager.isActualTransactionActive();
         if (inTransaction) {
-            throw new RuntimeException(StrUtil.format("当前处于事务状态无法跨线程, 请尝试使用 本类的countDownLatch() 方法 "));
+            throw new RuntimeException(StrUtil.format("当前处于事务状态无法跨线程, 请尝试使用 本类的 sync() 方法 "));
         } else {
             CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                 sw.start(taskName);
@@ -74,7 +87,7 @@ public class PkSync {
         if (!futures.isEmpty()) {
             boolean inTransaction = TransactionSynchronizationManager.isActualTransactionActive();
             if (inTransaction) {
-                throw new RuntimeException(StrUtil.format("当前处于事务状态无法跨线程, 请尝试使用 本类的countDownLatch() 方法 "));
+                throw new RuntimeException(StrUtil.format("当前处于事务状态无法跨线程, 请尝试使用 本类的 sync() 方法 "));
             } else {
                 final CompletableFuture[] futuresArray = futures.toArray(CompletableFuture[]::new);
                 final CompletableFuture<Void> future = CompletableFuture.allOf(futuresArray);
@@ -95,33 +108,58 @@ public class PkSync {
     }
 
 
-    public static MySyncMethod countDownLatch(CountDownLatch cd) {
-        return new MySyncMethod(cd);
+    public static MySyncMethod sync(Executor poolExecutor) {
+        return new MySyncMethod(poolExecutor);
+    }
+
+
+    public static MySyncMethod sync(String id, Executor poolExecutor) {
+        return new MySyncMethod(poolExecutor, id);
     }
 
     public static class MySyncMethod {
+        Executor poolExecutor;
+        ConcurrentStopWatch sw;
+        List<Map<String, Runnable>> runnables = new ArrayList<>();
 
-        CountDownLatch cd;
-        List<Runnable> runnables = new ArrayList<>();
-
-        public MySyncMethod(CountDownLatch cd) {
-            this.cd = cd;
+        public MySyncMethod(Executor poolExecutor) {
+            this.poolExecutor = poolExecutor;
+            this.sw = new ConcurrentStopWatch(StrUtil.EMPTY);
         }
 
-        public MySyncMethod add(Runnable runnable) {
-            runnables.add(runnable);
+        public MySyncMethod(Executor poolExecutor, String id) {
+            this.poolExecutor = poolExecutor;
+            this.sw = new ConcurrentStopWatch(id);
+        }
+
+        public MySyncMethod add(String taskName, Runnable runnable) {
+            final Map<String, Runnable> map = new HashMap<>();
+            map.put(taskName, runnable);
+            runnables.add(map);
             return this;
         }
 
-        @Async("taskExecutor")
-        @Transactional
-        public <V> void execute() {
-            for (Runnable runnable : runnables) {
+        public void join(long timeout, TimeUnit unit) {
+            final CountDownLatch cd = new CountDownLatch(runnables.size());
+            for (Map<String, Runnable> runnableMap : runnables) {
                 // 子线程中的事务
-                runnable.run();
-                cd.countDown();
+                for (Map.Entry<String, Runnable> entry : runnableMap.entrySet()) {
+                    final String taskName = entry.getKey();
+                    final Runnable value = entry.getValue();
+                    sw.start(taskName);
+                    springSyncMethod.sync(poolExecutor, cd, value);
+                    sw.stop(taskName);
+                }
             }
+            try {
+                cd.await(timeout, unit);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            log.info(sw.prettyPrint(TimeUnit.MILLISECONDS));
+            runnables.clear();
         }
 
     }
+
 }

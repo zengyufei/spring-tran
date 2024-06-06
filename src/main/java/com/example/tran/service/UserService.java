@@ -8,18 +8,18 @@ import com.example.tran.mapper.User2Mapper;
 import com.example.tran.mapper.UserMapper;
 import com.example.tran.utils.PkSync;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-/**
- * User service impl.
- */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class UserService extends ServiceImpl<UserMapper, User> implements IService<User> {
@@ -55,28 +55,6 @@ public class UserService extends ServiceImpl<UserMapper, User> implements IServi
     @Transactional(rollbackFor = Exception.class)
     public void check() throws Exception {
 
-        PkSync.of(poolExecutor)
-                .add("1", () -> {
-                    final List<User> temp = userMapper.selectList(Wrappers.<User>lambdaQuery().eq(User::getId, 1L));
-                    System.out.println(temp.get(0).getAge());
-                })
-                .add("2", () -> {
-                    final List<User> temp = userMapper.selectList(Wrappers.<User>lambdaQuery().eq(User::getId, 2L));
-                    System.out.println(temp.get(0).getAge());
-                })
-                .add("3", () -> {
-                    final List<User> temp = userMapper.selectList(Wrappers.<User>lambdaQuery().eq(User::getId, 3L));
-                    System.out.println(temp.get(0).getAge());
-                })
-                .add("4", () -> {
-                    final List<User> temp = userMapper.selectList(Wrappers.<User>lambdaQuery().eq(User::getId, 4L));
-                    System.out.println(temp.get(0).getAge());
-                })
-                .add("5", () -> {
-                    final List<User> temp = userMapper.selectList(Wrappers.<User>lambdaQuery().eq(User::getId, 5L));
-                    System.out.println(temp.get(0).getAge());
-                })
-                .waitAll(3, TimeUnit.SECONDS);
 
         {
             final List<User> users = userMapper.selectList(Wrappers.emptyWrapper());
@@ -86,22 +64,21 @@ public class UserService extends ServiceImpl<UserMapper, User> implements IServi
             this.updateBatchById(users);
         }
 
-        {
-            final List<User> users = userMapper.selectList(Wrappers.emptyWrapper());
-            for (User user : users) {
-                System.out.println(user.getAge());
-            }
-        }
+//        {
+//            final List<User> users = userMapper.selectList(Wrappers.emptyWrapper());
+//            for (User user : users) {
+//                System.out.println(user.getAge());
+//            }
+//        }
+        sync();
 
-        final CountDownLatch cd = new CountDownLatch(5);
-        PkSync.countDownLatch(cd)
-                .add(() -> queryById(1L))
-                .add(() -> queryById(2L))
-                .add(() -> queryById(3L))
-                .add(() -> queryById(4L))
-                .add(() -> queryById(5L))
-                .execute();
-        cd.await();
+        PkSync.sync("test", poolExecutor)
+                .add("1L", () -> queryById(1L))
+                .add("2L", () -> queryById(2L))
+                .add("3L", () -> queryById(3L))
+                .add("4L", () -> queryById(4L))
+                .add("5L", () -> queryById(5L))
+                .join(5, TimeUnit.SECONDS);
 
 //        PkSync.of(poolExecutor)
 //                .add("1", () -> {
@@ -134,12 +111,19 @@ public class UserService extends ServiceImpl<UserMapper, User> implements IServi
 //                })
 //                .waitAll(3, TimeUnit.SECONDS);
 
+        int i = 1 / 0;
+    }
 
+
+    @Async
+    @Transactional(rollbackFor = Exception.class, propagation = Propagation.REQUIRES_NEW)
+    public void sync() {
+        queryById(1L);
     }
 
     public void queryById(long id) {
         // 子线程中的事务
         final List<User> temp = userMapper.selectList(Wrappers.<User>lambdaQuery().eq(User::getId, id));
-        System.out.println(temp.get(0).getAge());
+        log.info(String.valueOf(temp.get(0).getAge()));
     }
 }
